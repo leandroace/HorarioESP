@@ -1039,21 +1039,53 @@ function LoginModal({ onClose }) {
     setMessage(null);
 
     try {
-      const { error } = await supabase.auth.signInWithOtp({
-        email,
-        options: {
-          emailRedirectTo: window.location.origin,
-        },
-      });
+      const emailLower = email.toLowerCase().trim();
+      
+      // Paso 1: Verificar si el email está en profiles (whitelist)
+      console.log('🔍 Verificando whitelist para:', emailLower);
+      
+      const { data: profile, error: profileError } = await supabase
+        .from('profiles')
+        .select('id, email')
+        .eq('email', emailLower)
+        .maybeSingle();
 
-      if (error) throw error;
+      // Paso 2: Si está en whitelist → Auto-login
+      if (profile) {
+        console.log('✅ Usuario en whitelist detectado, intentando auto-login');
+        
+        // Contraseña compartida para todos los usuarios de whitelist
+        const SHARED_PASSWORD = 'AutoPass_Univalle2026';
+        
+        const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+          email: emailLower,
+          password: SHARED_PASSWORD
+        });
 
-      setMessage({
-        type: 'success',
-        text: '¡Revisa tu correo! Te hemos enviado un enlace mágico para iniciar sesión.'
-      });
-      setEmail('');
+        if (authError) {
+          // Si falla el auto-login, usar magic link como fallback
+          console.warn('⚠️ Auto-login no disponible, usando magic link');
+          await enviarMagicLink(emailLower, true);
+        } else {
+          // Auto-login exitoso
+          console.log('✅ Auto-login exitoso');
+          setMessage({
+            type: 'success',
+            text: '✅ ¡Bienvenido! Acceso concedido automáticamente.'
+          });
+          
+          setTimeout(() => {
+            onClose();
+          }, 1000);
+        }
+      } else {
+        // Paso 3: No está en whitelist → Magic Link normal
+        console.log('📧 Usuario no en whitelist, enviando magic link');
+        await enviarMagicLink(emailLower, false);
+      }
     } catch (error) {
+      console.error('❌ Error en login:', error);
+      
       if (error.message.includes('429') || error.message.includes('Too Many Requests')) {
         setMessage({
           type: 'error',
@@ -1068,6 +1100,25 @@ function LoginModal({ onClose }) {
     } finally {
       setLoading(false);
     }
+  };
+
+  const enviarMagicLink = async (email, esWhitelisted) => {
+    const { error } = await supabase.auth.signInWithOtp({
+      email: email,
+      options: {
+        emailRedirectTo: window.location.origin,
+      },
+    });
+
+    if (error) throw error;
+
+    setMessage({
+      type: 'success',
+      text: esWhitelisted 
+        ? '📧 Usuario pre-aprobado. Revisa tu correo para el enlace de acceso.' 
+        : '📧 Revisa tu correo. Te hemos enviado un enlace mágico para iniciar sesión.'
+    });
+    setEmail('');
   };
 
   return (
@@ -1117,6 +1168,20 @@ function LoginModal({ onClose }) {
         .modal-close:hover {
           color: #C41E3A;
         }
+
+        .whitelist-badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.5rem;
+          padding: 0.5rem 1rem;
+          background: rgba(79, 172, 115, 0.15);
+          border: 1px solid rgba(79, 172, 115, 0.3);
+          border-radius: 20px;
+          color: #4fac73;
+          font-size: 0.85rem;
+          font-weight: 600;
+          margin-top: 0.5rem;
+        }
         
         @keyframes fadeIn {
           from { opacity: 0; }
@@ -1141,7 +1206,7 @@ function LoginModal({ onClose }) {
           
           <h1 className="login-title">Iniciar Sesión</h1>
           <p className="login-subtitle">
-            Ingresa tu correo para recibir un enlace de acceso
+            Ingresa tu correo electrónico
           </p>
 
           {message && (
@@ -1168,13 +1233,14 @@ function LoginModal({ onClose }) {
               disabled={loading}
               style={{ width: '100%' }}
             >
-              {loading ? 'Enviando...' : 'Enviar enlace mágico'}
+              {loading ? 'Verificando...' : 'Continuar'}
             </button>
           </form>
 
           <p style={{ marginTop: '2rem', color: '#666666', fontSize: '0.9rem', textAlign: 'center' }}>
-            ¿Problemas con el rate limit? Espera 1 hora o usa otro email con +test1, +test2, etc.
+            Si estás pre-aprobado, entrarás automáticamente. Si no, recibirás un enlace por correo.
           </p>
+
 
           <button 
             onClick={onClose}
@@ -2300,6 +2366,7 @@ function MisReservasView({ reservas, onUpdate }) {
 function AdminView({ salones, onUpdate }) {
   const [showForm, setShowForm] = useState(false);
   const [editingSalon, setEditingSalon] = useState(null);
+  const [adminTab, setAdminTab] = useState('salones'); // 'salones' o 'whitelist'
 
   const handleEdit = (salon) => {
     setEditingSalon(salon);
@@ -2344,59 +2411,285 @@ function AdminView({ salones, onUpdate }) {
 
   return (
     <>
-      <div style={{ marginBottom: '2rem' }}>
+      {/* Tabs de administración */}
+      <div className="nav-tabs" style={{ marginBottom: '2rem' }}>
         <button
-          className="button"
-          onClick={() => setShowForm(true)}
+          className={`tab-button ${adminTab === 'salones' ? 'active' : ''}`}
+          onClick={() => setAdminTab('salones')}
         >
-          + Crear Nuevo Salón
+          🏢 Gestionar Salones
+        </button>
+        <button
+          className={`tab-button ${adminTab === 'whitelist' ? 'active' : ''}`}
+          onClick={() => setAdminTab('whitelist')}
+        >
+          ⚡ Whitelist de Usuarios
         </button>
       </div>
 
-      {salones.length === 0 ? (
-        <div className="empty-state">
-          <div className="empty-state-icon">🏢</div>
-          <h2>No hay salones creados</h2>
-          <p>Crea el primer salón para comenzar</p>
-        </div>
-      ) : (
-        <div className="grid">
-          {salones.map(salon => (
-            <div key={salon.id} className="card">
-              <h3 className="card-title">{salon.nombre}</h3>
-              {salon.descripcion && (
-                <p className="card-detail">{salon.descripcion}</p>
-              )}
-              <p className="card-detail">
-                <strong>Capacidad:</strong> {salon.capacidad} personas
-              </p>
-              {salon.ubicacion && (
-                <p className="card-detail">
-                  <strong>Ubicación:</strong> {salon.ubicacion}
-                </p>
-              )}
-              
-              <div style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem' }}>
-                <button
-                  className="button button-secondary"
-                  style={{ flex: 1 }}
-                  onClick={() => handleEdit(salon)}
-                >
-                  Editar
-                </button>
+      {/* Vista de Salones */}
+      {adminTab === 'salones' && (
+        <>
+          <div style={{ marginBottom: '2rem' }}>
+            <button
+              className="button"
+              onClick={() => setShowForm(true)}
+            >
+              + Crear Nuevo Salón
+            </button>
+          </div>
+
+          {salones.length === 0 ? (
+            <div className="empty-state">
+              <div className="empty-state-icon">🏢</div>
+              <h2>No hay salones creados</h2>
+              <p>Crea el primer salón para comenzar</p>
+            </div>
+          ) : (
+            <div className="grid">
+              {salones.map(salon => (
+                <div key={salon.id} className="card">
+                  <h3 className="card-title">{salon.nombre}</h3>
+                  {salon.descripcion && (
+                    <p className="card-detail">{salon.descripcion}</p>
+                  )}
+                  <p className="card-detail">
+                    <strong>Capacidad:</strong> {salon.capacidad} personas
+                  </p>
+                  {salon.ubicacion && (
+                    <p className="card-detail">
+                      <strong>Ubicación:</strong> {salon.ubicacion}
+                    </p>
+                  )}
+                  
+                  <div style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem' }}>
+                    <button
+                      className="button button-secondary"
+                      style={{ flex: 1 }}
+                      onClick={() => handleEdit(salon)}
+                    >
+                      Editar
+                    </button>
+                    <button
+                      className="button button-danger"
+                      style={{ flex: 1 }}
+                      onClick={() => handleDelete(salon.id)}
+                    >
+                      Eliminar
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Vista de Whitelist */}
+      {adminTab === 'whitelist' && (
+        <WhitelistManager />
+      )}
+    </>
+  );
+}
+
+// ============================================================================
+// GESTOR DE WHITELIST
+// ============================================================================
+function WhitelistManager() {
+  const [whitelist, setWhitelist] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [newEmail, setNewEmail] = useState('');
+  const [newNotes, setNewNotes] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [message, setMessage] = useState(null);
+
+  useEffect(() => {
+    loadWhitelist();
+  }, []);
+
+  const loadWhitelist = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('whitelist')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+
+      setWhitelist(data || []);
+    } catch (err) {
+      console.error('Error cargando whitelist:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAdd = async (e) => {
+    e.preventDefault();
+    setAdding(true);
+    setMessage(null);
+
+    try {
+      const { error } = await supabase
+        .from('whitelist')
+        .insert([{
+          email: newEmail.toLowerCase().trim(),
+          notes: newNotes.trim() || null
+        }]);
+
+      if (error) {
+        if (error.message.includes('unique')) {
+          throw new Error('Este email ya está en la whitelist');
+        }
+        throw error;
+      }
+
+      setMessage({ type: 'success', text: '✅ Email agregado a la whitelist' });
+      setNewEmail('');
+      setNewNotes('');
+      loadWhitelist();
+    } catch (err) {
+      setMessage({ type: 'error', text: err.message });
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const handleDelete = async (id, email) => {
+    if (!confirm(`¿Eliminar "${email}" de la whitelist?`)) return;
+
+    try {
+      const { error } = await supabase
+        .from('whitelist')
+        .delete()
+        .eq('id', id);
+
+      if (error) throw error;
+
+      setMessage({ type: 'success', text: '✅ Email eliminado de la whitelist' });
+      loadWhitelist();
+    } catch (err) {
+      alert('Error al eliminar: ' + err.message);
+    }
+  };
+
+  if (loading) {
+    return <div style={{ textAlign: 'center', padding: '2rem', color: '#666666' }}>Cargando whitelist...</div>;
+  }
+
+  return (
+    <div>
+      <div style={{ marginBottom: '2rem', padding: '1.5rem', background: 'rgba(220, 20, 60, 0.05)', borderRadius: '12px' }}>
+        <h3 style={{ color: '#C41E3A', marginBottom: '0.5rem' }}>⚡ ¿Qué es la Whitelist?</h3>
+        <p style={{ color: '#666666', fontSize: '0.95rem', lineHeight: '1.6' }}>
+          La whitelist es una lista de emails pre-aprobados. Los usuarios en esta lista reciben un <strong>proceso de acceso prioritario</strong> al hacer login, identificándolos como usuarios autorizados de la organización.
+        </p>
+      </div>
+
+      {/* Formulario para agregar emails */}
+      <div className="form-container" style={{ marginBottom: '2rem' }}>
+        <h3 className="card-title">Agregar Email a Whitelist</h3>
+
+        {message && (
+          <div className={`message message-${message.type}`} style={{ marginBottom: '1rem' }}>
+            {message.text}
+          </div>
+        )}
+
+        <form onSubmit={handleAdd}>
+          <div className="form-group">
+            <label className="form-label">Email del usuario</label>
+            <input
+              type="email"
+              className="form-input"
+              placeholder="usuario@ejemplo.com"
+              value={newEmail}
+              onChange={(e) => setNewEmail(e.target.value)}
+              required
+              disabled={adding}
+            />
+          </div>
+
+          <div className="form-group">
+            <label className="form-label">Notas (opcional)</label>
+            <input
+              type="text"
+              className="form-input"
+              placeholder="Ej: Empleado del departamento X"
+              value={newNotes}
+              onChange={(e) => setNewNotes(e.target.value)}
+              disabled={adding}
+            />
+          </div>
+
+          <button
+            type="submit"
+            className="button"
+            disabled={adding}
+            style={{ width: '100%' }}
+          >
+            {adding ? 'Agregando...' : '+ Agregar a Whitelist'}
+          </button>
+        </form>
+      </div>
+
+      {/* Lista de emails en whitelist */}
+      <div>
+        <h3 className="card-title" style={{ marginBottom: '1rem' }}>
+          Emails Aprobados ({whitelist.length})
+        </h3>
+
+        {whitelist.length === 0 ? (
+          <div className="empty-state">
+            <div className="empty-state-icon">📝</div>
+            <h2>Whitelist vacía</h2>
+            <p>Agrega el primer email para comenzar</p>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            {whitelist.map(item => (
+              <div
+                key={item.id}
+                className="card"
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'flex-start',
+                  padding: '1.5rem'
+                }}
+              >
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                    <span style={{ fontSize: '1.2rem' }}>⚡</span>
+                    <strong style={{ color: '#C41E3A', fontSize: '1.1rem' }}>{item.email}</strong>
+                  </div>
+                  {item.notes && (
+                    <p style={{ color: '#666666', fontSize: '0.9rem', marginTop: '0.5rem' }}>
+                      📝 {item.notes}
+                    </p>
+                  )}
+                  <p style={{ color: '#999999', fontSize: '0.85rem', marginTop: '0.5rem' }}>
+                    Agregado: {new Date(item.created_at).toLocaleDateString('es-ES', {
+                      year: 'numeric',
+                      month: 'long',
+                      day: 'numeric'
+                    })}
+                  </p>
+                </div>
                 <button
                   className="button button-danger"
-                  style={{ flex: 1 }}
-                  onClick={() => handleDelete(salon.id)}
+                  onClick={() => handleDelete(item.id, item.email)}
+                  style={{ marginLeft: '1rem' }}
                 >
                   Eliminar
                 </button>
               </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
