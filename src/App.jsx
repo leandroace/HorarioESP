@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { createClient } from '@supabase/supabase-js';
+import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 
 // ============================================================================
 // CONFIGURACIÓN DE SUPABASE
 // ============================================================================
 // Las credenciales se cargan desde el archivo .env (no subir a GitHub)
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const SUPABASE_URL = 'https://hywvxfkfixuveeigmfuq.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh5d3Z4ZmtmaXh1dmVlaWdtZnVxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk0ODMyMTgsImV4cCI6MjA4NTA1OTIxOH0.lxZey4FY4gQBlK5YFC7JQkMD9sCSpIvpRL34tty38CQ';
 
 // Validación de variables de entorno
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
@@ -15,6 +16,118 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// ============================================================================
+// FUNCIÓN DE GENERACIÓN DE PDF
+// ============================================================================
+const pad2 = (n) => String(n).padStart(2, '0');
+
+async function generarFormatoSolicitud(reserva, salon, usuario) {
+  try {
+    // IMPORTANTE: Debes tener el archivo PDF de plantilla en public/formats/aula.pdf
+    const plantillaURL = '/formats/aula.pdf';
+    
+    const bytes = await fetch(plantillaURL).then(r => {
+      if (!r.ok) {
+        throw new Error('No se encontró la plantilla PDF. Asegúrate de tener el archivo en public/formats/aula.pdf');
+      }
+      return r.arrayBuffer();
+    });
+    
+    const pdf = await PDFDocument.load(bytes);
+    const page = pdf.getPages()[0];
+    const { width, height } = page.getSize();
+    const font  = await pdf.embedFont(StandardFonts.Helvetica);
+    const fontB = await pdf.embedFont(StandardFonts.HelveticaBold);
+    const yTop  = y => height - y; // convertir "desde arriba"
+    
+    // -------- Coordenadas (mitad izquierda) --------
+    const xBase = 44;
+    const Y = {
+      fechaActual:       160,
+      nombreSolicitante: 208,
+      facultad:          208,
+      area:              208,
+      actividades:       236,
+      filaDatos:         282,
+      observ:            330
+    };
+    const X = {
+      fecha:      xBase + 32,
+      horaInicio: xBase + 115,
+      horaFin:    xBase + 200,
+      cupo:       xBase + 260,
+      aula:       xBase + 292
+    };
+    
+    // Fechas de inicio/fin (las de la reserva)
+    const ini = new Date(reserva.fecha_inicio);
+    const fin = new Date(reserva.fecha_fin);
+    const fechaStr = `${pad2(ini.getDate())}/${pad2(ini.getMonth()+1)}/${ini.getFullYear()}`;
+    const horaIni  = `${pad2(ini.getHours())}:${pad2(ini.getMinutes())}`;
+    const horaFin  = `${pad2(fin.getHours())}:${pad2(fin.getMinutes())}`;
+    
+    // Fecha ACTUAL de emisión del formato (automática)
+    const hoy = new Date();
+    const fechaActualStr = `${pad2(hoy.getDate())}       ${pad2(hoy.getMonth()+1)}      ${hoy.getFullYear()}`;
+    
+    const draw = (text, x, y, { bold=false, size=10 } = {}) => {
+      page.drawText(String(text ?? ''), {
+        x, y: yTop(y), size,
+        font: bold ? fontB : font,
+        color: rgb(0, 0, 0)
+      });
+    };
+    
+    // ------- Campos -------
+    // Fecha actual
+    draw(fechaActualStr, xBase + 253, Y.fechaActual, { bold: true });
+    
+    // Nombre del solicitante (email del usuario)
+    const nombreUsuario = usuario?.email
+  ? usuario.email
+      .split('@')[0]
+      .replace('.', ' ')
+      .replace(/\b\w/g, l => l.toUpperCase())
+  : 'Usuario';
+
+draw(nombreUsuario, xBase + 16, Y.nombreSolicitante, { bold: true });
+
+    
+    // Facultad y Área
+    draw('SALUD', xBase + 150, Y.facultad, { bold: true });
+    draw('SALUD', xBase + 250, Y.area,     { bold: true });
+    
+    // Actividades / descripción (propósito de la reserva)
+    draw(reserva.proposito || 'Reserva de salón', xBase + 16, Y.actividades, { bold: true });
+    
+    // Fila: fecha de uso, hora ini/fin, cupo, aula
+    draw(fechaStr,                    X.fecha,      Y.filaDatos);
+    draw(horaIni,                     X.horaInicio, Y.filaDatos);
+    draw(horaFin,                     X.horaFin,    Y.filaDatos);
+    draw(String(salon?.capacidad || ''), X.cupo,     Y.filaDatos);
+    draw(salon?.nombre || '',         X.aula,       Y.filaDatos, { bold: true });
+    
+    // Observaciones (si las hay)
+    if (reserva.observaciones) {
+      draw(reserva.observaciones, xBase + 100, Y.observ);
+    }
+    
+    const out = await pdf.save();
+    const blob = new Blob([out], { type: 'application/pdf' });
+    const url  = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Solicitud_${(reserva.proposito || 'reserva').replace(/\s+/g, '_')}.pdf`;
+    a.click();
+    URL.revokeObjectURL(url);
+    
+    return true;
+  } catch (error) {
+    console.error('Error generando PDF:', error);
+    throw error;
+  }
+}
 
 // ============================================================================
 // COMPONENTE PRINCIPAL
@@ -2298,6 +2411,7 @@ function ReservaForm({ salon, user, onClose, onSuccess }) {
 // ============================================================================
 function MisReservasView({ reservas, onUpdate }) {
   const [cancelando, setCancelando] = useState(null);
+  const [generandoPdf, setGenerandoPdf] = useState(null);
 
   const handleCancelar = async (reservaId) => {
     if (!confirm('¿Estás seguro de que quieres cancelar esta reserva?')) {
@@ -2318,6 +2432,37 @@ function MisReservasView({ reservas, onUpdate }) {
       alert('Error al cancelar la reserva: ' + err.message);
     } finally {
       setCancelando(null);
+    }
+  };
+
+  const handleDescargarPDF = async (reserva) => {
+    setGenerandoPdf(reserva.id);
+    try {
+      // Obtener datos del salón
+      const { data: salon, error } = await supabase
+        .from('salones')
+        .select('*')
+        .eq('id', reserva.salon_id)
+        .single();
+
+      if (error) throw error;
+
+      // Obtener datos del usuario (del perfil)
+      const { data: usuario } = await supabase
+        .from('profiles')
+        .select('email')
+        .eq('id', reserva.user_id)
+        .single();
+
+      // Generar PDF
+      await generarFormatoSolicitud(reserva, salon, usuario);
+
+      alert('✅ PDF generado exitosamente');
+    } catch (err) {
+      console.error('Error generando PDF:', err);
+      alert('❌ Error al generar PDF: ' + err.message + '\n\nAsegúrate de que existe el archivo public/formats/aula.pdf');
+    } finally {
+      setGenerandoPdf(null);
     }
   };
 
@@ -2346,14 +2491,24 @@ function MisReservasView({ reservas, onUpdate }) {
             <strong>Propósito:</strong> {reserva.proposito}
           </p>
           
-          <button
-            className="button button-danger"
-            style={{ width: '100%', marginTop: '1rem' }}
-            onClick={() => handleCancelar(reserva.id)}
-            disabled={cancelando === reserva.id}
-          >
-            {cancelando === reserva.id ? 'Cancelando...' : 'Cancelar Reserva'}
-          </button>
+          <div style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem' }}>
+            <button
+              className="button"
+              style={{ flex: 1 }}
+              onClick={() => handleDescargarPDF(reserva)}
+              disabled={generandoPdf === reserva.id}
+            >
+              {generandoPdf === reserva.id ? '📄 Generando...' : '📄 Descargar PDF'}
+            </button>
+            <button
+              className="button button-danger"
+              style={{ flex: 1 }}
+              onClick={() => handleCancelar(reserva.id)}
+              disabled={cancelando === reserva.id}
+            >
+              {cancelando === reserva.id ? 'Cancelando...' : 'Cancelar'}
+            </button>
+          </div>
         </div>
       ))}
     </div>
